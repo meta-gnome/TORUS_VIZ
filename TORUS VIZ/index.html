@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Audio Fractal Torus</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            outline: none;
+            /* Remove focus outline */
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #info {
+            color: rgba(255, 255, 255, 0.8);
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9);
+            text-align: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 300;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        p {
+            margin: 5px 0 0;
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+
+        /* Start Overlay */
+        #start-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 100;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+            transition: opacity 0.5s ease;
+        }
+
+        #start-btn {
+            background: transparent;
+            border: 2px solid #0ff;
+            color: #0ff;
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+        }
+
+        #start-btn:hover {
+            background: #0ff;
+            color: #000;
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.6);
+        }
+
+        /* Presets */
+        .presets {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            pointer-events: auto;
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.8);
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 12px;
+            border-radius: 20px;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: #0ff;
+            color: #0ff;
+            transform: translateY(-2px);
+        }
+
+        .btn.active {
+            background: rgba(0, 255, 255, 0.2);
+            border-color: #0ff;
+            color: #fff;
+        }
+    </style>
+
+    <!-- Import Map for reliable module loading -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+
+<body>
+
+    <div id="start-overlay">
+        <button id="start-btn">Initialize System</button>
+        <p style="margin-top: 20px; color: #888;">Microphone access required for audio reactivity</p>
+    </div>
+
+    <div id="ui-layer">
+        <div id="info">
+            <h1>Fractal Torus</h1>
+            <p>Scroll to Zoom • Drag to Rotate • <b>Music & Clicks cause Ripples</b></p>
+        </div>
+
+        <div class="presets">
+            <button class="btn" onclick="setPreset(1)">Neon Ring</button>
+            <button class="btn" onclick="setPreset(2)">Deep Void</button>
+            <button class="btn" onclick="setPreset(3)">Spiky Glitch</button>
+            <button class="btn" onclick="setPreset(4)">Smooth Flow</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let camera, scene, renderer, controls;
+        let torusMesh, material;
+        let starSystem, starGeo; // Particle system
+        let starBasePositions = []; // Store original positions
+        let raycaster, mouse;
+
+        let analyser, dataArray;
+        let isAudioActive = false;
+
+        // State
+        let segments = 6.0;
+        let fractalIter = 4.0;
+        let spikeFactor = 0.2;
+
+        // Ripple State
+        let clickTime = 0;
+        let clickPos = new THREE.Vector3(0, 0, 0);
+        let isRippleActive = false;
+
+        // Audio Beat Detection State
+        let beatTimer = 0;
+        let previousBass = 0;
+
+        const clock = new THREE.Clock();
+
+        // ------------------------------------------------------------
+        // Shaders
+        // ------------------------------------------------------------
+
+        const vertexShader = `
+            uniform float iTime;
+            uniform float uAudioLow;  // Bass
+            uniform float uAudioHigh; // Treble
+            uniform float uSpikeFactor;
+            
+            // Ripple Uniforms
+            uniform vec3 uClickPos;
+            uniform float uClickTime;
+            
+            varying vec2 vUv;
+            varying float vDisplacement;
+            varying vec3 vPosition;
+
+            void main() {
+                vUv = uv;
+                vPosition = position;
+                
+                vec3 newPosition = position;
+                
+                // 1. Audio Reactivity
+                float noise = sin(uv.x * 20.0 + iTime) * cos(uv.y * 10.0 + iTime);
+                float bassPulse = uAudioLow * 0.5; 
+                float trebleSpike = uAudioHigh * uSpikeFactor * noise;
+                float displacement = bassPulse + trebleSpike;
+                
+                // 2. Ripple Logic (Gravity Push)
+                float rippleDist = distance(position, uClickPos);
+                
+                // Create an expanding sine wave
+                float wave = sin(rippleDist * 8.0 - uClickTime * 15.0);
+                
+                // Decay the wave over time and distance
+                float decay = exp(-uClickTime * 3.0) * smoothstep(5.0, 0.0, rippleDist);
+                
+                // Only apply if click time is recent
+                if(uClickTime < 2.0) {
+                    displacement += wave * decay * 0.5; // 0.5 is ripple strength
+                }
+                
+                // Apply final displacement along normal
+                newPosition += normal * displacement;
+                
+                vDisplacement = displacement;
+
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform float iTime;
+            uniform vec2 iResolution;
+            uniform float iSegments;
+            uniform float iIter;
+            uniform float uAudioMid;
+            
+            varying vec2 vUv;
+            varying float vDisplacement;
+
+            vec3 palette( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d ) {
+                return a + b*cos( 6.28318*(c*t+d) );
+            }
+
+            void main() {
+                vec2 uv = (vUv * 2.0 - 1.0) * 2.0;
+                
+                vec2 p = uv;
+                vec2 p0 = p;
+                
+                vec3 finalColor = vec3(0.0);
+                
+                for(float i = 0.0; i < 4.0; i++) {
+                    if (i >= iIter) break;
+
+                    p = fract(p * 1.5) - 0.5;
+                    float d = length(p) * exp(-length(p0));
+                    
+                    vec3 col = palette(length(p0) + i*.4 + iTime*.4 + uAudioMid * 0.2, 
+                                     vec3(0.5, 0.5, 0.5),
+                                     vec3(0.5, 0.5, 0.5),
+                                     vec3(1.0, 1.0, 1.0),
+                                     vec3(0.263,0.416,0.557));
+
+                    d = sin(d * 8.0 + iTime) / 8.0;
+                    d = abs(d);
+                    d = pow(0.01 / d, 1.2);
+                    
+                    finalColor += col * d;
+                }
+
+                // Add rim lighting/glow from displacement
+                finalColor += vec3(0.2, 0.8, 1.0) * vDisplacement * 2.0;
+
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `;
+
+        // ------------------------------------------------------------
+        // Init
+        // ------------------------------------------------------------
+
+        function init() {
+            // Scene Setup
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.03);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 4;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // Orbit Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 0.1;
+            controls.maxDistance = 20;
+
+            // Interaction Setup
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+
+            // --- Main Geometry ---
+            const geometry = new THREE.TorusGeometry(1.5, 0.6, 100, 200);
+
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    iTime: { value: 0 },
+                    iResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    iSegments: { value: segments },
+                    iIter: { value: fractalIter },
+                    uAudioLow: { value: 0.0 },
+                    uAudioMid: { value: 0.0 },
+                    uAudioHigh: { value: 0.0 },
+                    uSpikeFactor: { value: spikeFactor },
+                    // Ripple uniforms
+                    uClickPos: { value: new THREE.Vector3() },
+                    uClickTime: { value: 10.0 } // Start > 2.0 so no ripple initially
+                },
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                side: THREE.DoubleSide,
+                wireframe: false
+            });
+
+            torusMesh = new THREE.Mesh(geometry, material);
+            scene.add(torusMesh);
+
+            // --- Particle System ---
+            createParticles();
+
+            // Listeners
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('mousedown', onMouseDown); // Mouse interaction
+
+            // Audio Start
+            document.getElementById('start-btn').addEventListener('click', setupAudio);
+        }
+
+        function createParticles() {
+            const particleCount = 3000;
+            const posArray = new Float32Array(particleCount * 3);
+
+            for (let i = 0; i < particleCount * 3; i += 3) {
+                // Spread particles in a large sphere area
+                const x = (Math.random() - 0.5) * 40;
+                const y = (Math.random() - 0.5) * 40;
+                const z = (Math.random() - 0.5) * 40;
+
+                posArray[i] = x;
+                posArray[i + 1] = y;
+                posArray[i + 2] = z;
+
+                // Store base positions for restoring after shockwave
+                starBasePositions.push(x, y, z);
+            }
+
+            starGeo = new THREE.BufferGeometry();
+            starGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+
+            const starMat = new THREE.PointsMaterial({
+                size: 0.06,
+                color: 0x88ccff,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            starSystem = new THREE.Points(starGeo, starMat);
+            scene.add(starSystem);
+        }
+
+        // ------------------------------------------------------------
+        // Interaction Logic (Raycasting & Ripple)
+        // ------------------------------------------------------------
+
+        function onMouseDown(event) {
+            // Calculate mouse position in normalized device coordinates
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            // Intersect with Torus
+            const intersects = raycaster.intersectObject(torusMesh);
+
+            if (intersects.length > 0) {
+                // Clicked on object
+                clickPos.copy(intersects[0].point);
+            } else {
+                // Clicked in space? Project a point in front of camera at standard depth
+                raycaster.ray.at(5.0, clickPos);
+            }
+
+            triggerRipple();
+        }
+
+        function triggerRipple() {
+            isRippleActive = true;
+            clickTime = 0;
+
+            // Update Shader
+            material.uniforms.uClickPos.value.copy(clickPos);
+            material.uniforms.uClickTime.value = 0;
+        }
+
+        function triggerAudioRipple() {
+            // Pick a random point roughly on the Torus ring for the ripple origin
+            // Torus major radius approx 1.5
+            const angle = Math.random() * Math.PI * 2;
+            const r = 1.5;
+            clickPos.set(Math.cos(angle) * r, Math.sin(angle) * r, 0);
+
+            // Apply rotation of mesh to point if needed, but since mesh rotates, world space is fine
+            // We'll just trigger it at this world coordinate
+            triggerRipple();
+        }
+
+        // ------------------------------------------------------------
+        // Audio Logic
+        // ------------------------------------------------------------
+
+        async function setupAudio() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(stream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 512;
+                source.connect(analyser);
+
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                isAudioActive = true;
+
+                const overlay = document.getElementById('start-overlay');
+                overlay.style.opacity = '0';
+                setTimeout(() => overlay.remove(), 500);
+
+            } catch (err) {
+                console.error("Audio init error:", err);
+                alert("Could not access microphone. Visuals will run in auto-mode.");
+                document.getElementById('start-overlay').remove();
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Utilities
+        // ------------------------------------------------------------
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            if (material) material.uniforms.iResolution.value.set(window.innerWidth, window.innerHeight);
+        }
+
+        window.setPreset = function (id) {
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+
+            if (id === 1) { // Neon Ring
+                material.uniforms.iSegments.value = 6.0;
+                material.uniforms.iIter.value = 4.0;
+                material.uniforms.uSpikeFactor.value = 0.2;
+                torusMesh.rotation.set(0, 0, 0);
+                material.wireframe = false;
+            } else if (id === 2) { // Deep Void
+                material.uniforms.iSegments.value = 12.0;
+                material.uniforms.iIter.value = 3.0;
+                material.uniforms.uSpikeFactor.value = 0.05;
+                material.wireframe = true;
+            } else if (id === 3) { // Spiky Glitch
+                material.uniforms.iSegments.value = 4.0;
+                material.uniforms.iIter.value = 4.0;
+                material.uniforms.uSpikeFactor.value = 0.8;
+                material.wireframe = false;
+            } else if (id === 4) { // Smooth Flow
+                material.uniforms.iSegments.value = 8.0;
+                material.uniforms.iIter.value = 2.0;
+                material.uniforms.uSpikeFactor.value = 0.1;
+                material.wireframe = false;
+            }
+        };
+
+        // ------------------------------------------------------------
+        // Animation Loop
+        // ------------------------------------------------------------
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (controls) controls.update();
+
+            const dt = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // Update Audio Data
+            let low = 0, mid = 0, high = 0;
+            if (isAudioActive && analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                const bufferLength = analyser.frequencyBinCount;
+                const lowBound = Math.floor(bufferLength * 0.1);
+                const midBound = Math.floor(bufferLength * 0.5);
+
+                for (let i = 0; i < lowBound; i++) low += dataArray[i];
+                for (let i = lowBound; i < midBound; i++) mid += dataArray[i];
+                for (let i = midBound; i < bufferLength; i++) high += dataArray[i];
+
+                low = (low / lowBound) / 255;
+                mid = (mid / (midBound - lowBound)) / 255;
+                high = (high / (bufferLength - midBound)) / 255;
+
+                // --- BEAT DETECTION ---
+                // If bass is loud AND has increased significantly since last frame
+                if (low > 0.45 && (low - previousBass) > 0.15) {
+                    if (beatTimer <= 0) {
+                        triggerAudioRipple();
+                        beatTimer = 0.2; // Cooldown in seconds
+                    }
+                }
+                if (beatTimer > 0) beatTimer -= dt;
+                previousBass = low;
+
+            } else {
+                low = Math.sin(time * 2) * 0.5 + 0.5;
+                mid = Math.cos(time * 1.5) * 0.5 + 0.5;
+                high = Math.sin(time * 4) * 0.3;
+            }
+
+            // Update Shader Uniforms
+            material.uniforms.iTime.value = time;
+            material.uniforms.uAudioLow.value = THREE.MathUtils.lerp(material.uniforms.uAudioLow.value, low, 0.1);
+            material.uniforms.uAudioMid.value = THREE.MathUtils.lerp(material.uniforms.uAudioMid.value, mid, 0.1);
+            material.uniforms.uAudioHigh.value = THREE.MathUtils.lerp(material.uniforms.uAudioHigh.value, high, 0.1);
+
+            // Ripple Time Logic
+            if (isRippleActive) {
+                clickTime += dt;
+                material.uniforms.uClickTime.value = clickTime;
+
+                // Stop ripple after 3 seconds
+                if (clickTime > 3.0) isRippleActive = false;
+            }
+
+            // Mesh Rotation
+            torusMesh.rotation.x += 0.002;
+            torusMesh.rotation.y += 0.004;
+            torusMesh.scale.setScalar(1.0 + material.uniforms.uAudioLow.value * 0.1);
+
+            // --- Update Particles (Starfield) ---
+            if (starSystem && starGeo) {
+                const positions = starGeo.attributes.position.array;
+
+                // Shockwave strength decays over time
+                const shockStrength = isRippleActive ? Math.exp(-clickTime * 4.0) * 10.0 : 0;
+
+                for (let i = 0; i < positions.length; i += 3) {
+                    // Current Position
+                    let px = positions[i];
+                    let py = positions[i + 1];
+                    let pz = positions[i + 2];
+
+                    // Base (Target) Position
+                    const bx = starBasePositions[i];
+                    const by = starBasePositions[i + 1];
+                    const bz = starBasePositions[i + 2];
+
+                    // 1. Shockwave Logic (Push away from clickPos)
+                    if (shockStrength > 0.01) {
+                        const dx = px - clickPos.x;
+                        const dy = py - clickPos.y;
+                        const dz = pz - clickPos.z;
+                        let distSq = dx * dx + dy * dy + dz * dz;
+
+                        // Avoid division by zero
+                        if (distSq < 0.1) distSq = 0.1;
+
+                        // Force decreases with distance from impact
+                        const force = shockStrength / distSq;
+
+                        px += (dx / Math.sqrt(distSq)) * force * 0.5;
+                        py += (dy / Math.sqrt(distSq)) * force * 0.5;
+                        pz += (dz / Math.sqrt(distSq)) * force * 0.5;
+                    }
+
+                    // 2. Return to base (Elasticity)
+                    // Lerp back to original position
+                    px += (bx - px) * 0.02;
+                    py += (by - py) * 0.02;
+                    pz += (bz - pz) * 0.02;
+
+                    positions[i] = px;
+                    positions[i + 1] = py;
+                    positions[i + 2] = pz;
+                }
+
+                starGeo.attributes.position.needsUpdate = true;
+
+                // General particle rotation & audio scale
+                starSystem.rotation.y += 0.001;
+                starSystem.rotation.x += 0.0005;
+                const scale = 1.0 + low * 0.15;
+                starSystem.scale.set(scale, scale, scale);
+                starSystem.rotation.z += high * 0.01;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+        animate();
+
+    </script>
+</body>
+
+</html>
